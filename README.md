@@ -1,1 +1,1 @@
-**Important** There is needed folder WorkDir because of hardcoded paths.
+**Important** The WorkDir folder is required due to hardcoded paths.
