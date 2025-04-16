@@ -9,7 +9,6 @@ namespace Sorter
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IEnumerable<string> Merge(IEnumerable<IEnumerable<ParsedLine>> inputs)
         {
-            //TODO   
             var enumerators = inputs.Select(e => e.GetEnumerator()).ToArray();
 
             if (enumerators.Length > 4)
@@ -76,7 +75,6 @@ namespace Sorter
             }
 
             enumerators[0].Dispose();
-
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -96,26 +94,26 @@ namespace Sorter
                 }
             }
 
-            var minIndex = 0;
-            while (queue.Count > 1)
+            var minIndex = queue.Dequeue();
+            while (queue.Count > 0)
             {
-                minIndex = queue.Dequeue();
                 var min = enumerators[minIndex].Current;
                 //return min element
                 yield return min.Line;
 
                 if (enumerators[minIndex].MoveNext())
                 {
-                    queue.Enqueue(minIndex, enumerators[minIndex].Current);
+                    minIndex = queue.EnqueueDequeue(minIndex, enumerators[minIndex].Current);
                 }
                 else
                 {
                     enumerators[minIndex].Dispose();
+                    minIndex = queue.Dequeue();
                 }
             }
 
-            minIndex = queue.Dequeue();
             yield return enumerators[minIndex].Current.Line;
+
             while (enumerators[minIndex].MoveNext())
             {
                 yield return enumerators[minIndex].Current.Line;
