@@ -6,7 +6,7 @@ namespace Validator
 {
     internal class Program
     {
-        private const string PathToWorkDir = @"..\..\..\..\..\..\WorkDir";
+        private const string PathToWorkDir = @"..\..\..\..\..\WorkDir";
         private const string DefaultFileName = @"sample_output.txt";
 
         static void Main(string[] args)

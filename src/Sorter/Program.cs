@@ -19,7 +19,7 @@ namespace Sorter
         private const string FileExtension = ".txt";
         private const string DefaultFileName = "sample";
         private const string ChunkFileName = "chunk_";
-        private const string PathToWorkDir = @"..\..\..\..\..\..\WorkDir";
+        private const string PathToWorkDir = @"..\..\..\..\..\WorkDir";
 
         static async Task Main(string[] args)
         {

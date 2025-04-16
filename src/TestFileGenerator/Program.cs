@@ -6,7 +6,7 @@ namespace TestFileGenerator
     internal class Program
     {
         private const int PrintOutput = 10_000_000;
-        private const string FileName = @"..\..\..\..\..\..\WorkDir\sample.txt";
+        private const string FileName = @"..\..\..\..\..\WorkDir\sample.txt";
 
         private const decimal Fraction = 0.1M;
         private const int LineNumberWithTheSameString = (int)(1 / Fraction);
