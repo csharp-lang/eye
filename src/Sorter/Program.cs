@@ -1,9 +1,10 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Sorter
@@ -12,15 +13,13 @@ namespace Sorter
     {
         private const int BytesInLine = 50; //To estimate number of lines in file
 
-        private readonly static int MaxChunkSize = Array.MaxLength / BytesInLine / 4; // so every chunk is about 2GB
-        private readonly static int MaxTaskCount = Environment.ProcessorCount / 2; //reduce workers because of possibility of Hyper-threading
+        private readonly static int MaxChunkSize = Array.MaxLength / BytesInLine / 4; // so every chunk is about 500MB
+        private readonly static int MaxSortingTaskCount = Environment.ProcessorCount / 2; //reduce workers because of possibility of Hyper-threading
 
         private const string FileExtension = ".txt";
         private const string DefaultFileName = "sample";
         private const string ChunkFileName = "chunk_";
         private const string PathToWorkDir = @"..\..\..\..\..\..\WorkDir";
-
-        private const bool WithCompression = false; //compression does not improve results on my computer
 
         static async Task Main(string[] args)
         {
@@ -32,170 +31,93 @@ namespace Sorter
 
             var numberOfLines = GetNumberOfLinesInFile(inputFile);
             var chunkSize = GetChunkSize(numberOfLines);
+            var maxIndexOfTempFiles = -1; //to start with zero after incrementing
+            using BlockingCollection<List<ParsedLine>> chunkQueue = new(MaxSortingTaskCount);
+            {
+                var tasks = new List<Task>(MaxSortingTaskCount + 1);
+                tasks.Add(Task.Run(() => ReadChunks(inputFile, chunkSize, chunkQueue)));
+                for (var i = 0; i < MaxSortingTaskCount; i++)
+                {
+                    tasks.Add(Task.Run(() => SortChunks(chunkQueue, ref maxIndexOfTempFiles)));
+                }
 
-            var sortingTasks = new Task[MaxTaskCount];
-            Array.Fill(sortingTasks, Task.CompletedTask);
-            var chunks = new ParsedLine[MaxTaskCount][];
+                await Task.WhenAll(tasks);
+            }
 
-            var (numberOfTempFiles, lastChunk) = await SortAndStoreToTempFiles(inputFile, chunks, sortingTasks, chunkSize);
-            MergeChunkFilesIntoOutputFile(outputFileName, numberOfTempFiles, lastChunk, false);
-
+            MergeChunkFilesIntoOutputFile(outputFileName, maxIndexOfTempFiles);
             stopwatch.Stop();
             Console.WriteLine($"The file was sorted in {stopwatch.Elapsed}.");
-            //DeleteChunkFiles(numberOfTempFiles);
+            DeleteChunkFiles(maxIndexOfTempFiles);
         }
-
-        #region Sort
-        private static void Sort(ParsedLine[] chunk, int realNumberOfElements) => Array.Sort(chunk, 0, realNumberOfElements);
-
-        private static async Task<(int numberOfTempFiles, IEnumerable<IEnumerable<ParsedLine>> lastChunk)> SortAndStoreToTempFiles(
+        private static void ReadChunks(
             string inputFileName,
-            ParsedLine[][] chunks,
-            Task[] sortingTasks,
-            int chunkSize)
+            int chunkSize,
+            BlockingCollection<List<ParsedLine>> chunkQueue)
         {
-            var fileNamesIndexer = 0;
-
-            var chunkIndex = 0;
-            var chunk = new ParsedLine[chunkSize];
-            chunks[chunkIndex] = chunk;
-
-            int i = 0;
-            foreach (var line in File.ReadLines(inputFileName))
+            try
             {
-                chunk[i++] = new ParsedLine(line);
+                var chunk = new List<ParsedLine>(chunkSize);
 
-                if (i == chunkSize)
+                foreach (var line in File.ReadLines(inputFileName))
                 {
-                    var chunkNumberCopy = chunkIndex;
-                    var sortTask = Task.Factory.StartNew(() => Sort(chunks[chunkNumberCopy], chunkSize));
-                    sortingTasks[chunkIndex] = sortTask;
+                    chunk.Add(new ParsedLine(line));
 
-                    i = 0;
-                    chunkIndex++;
-
-                    if (chunkIndex == MaxTaskCount)
+                    if (chunk.Count == chunkSize)
                     {
-                        //Waiting for all task and no start new sorting
-                        await Task.WhenAll(sortingTasks);
-                        MergeAndWriteToFile($"{ChunkFileName}{fileNamesIndexer++}", chunks, WithCompression);
-
-                        chunkIndex = 0;
-                        chunk = chunks[chunkIndex];
-                    }
-                    else
-                    {
-                        //Create new chunk if needed
-                        chunk = chunks[chunkIndex] ??= new ParsedLine[chunkSize];
+                        chunkQueue.Add(chunk);
+                        chunk = new List<ParsedLine>(chunkSize);
                     }
                 }
+
+                if (chunk.Count > 0)
+                {
+                    chunkQueue.Add(chunk); // Add the last chunk
+                }
             }
-
-            //Start last task
-            var lastSortTask = Task.Factory.StartNew(() => Sort(chunks[chunkIndex], i));
-            sortingTasks[chunkIndex] = lastSortTask;
-
-            await Task.WhenAll(sortingTasks);
-
-            var lastChunk = FixLastChunksToMerge(chunks, chunkIndex, i);
-
-            return (fileNamesIndexer, lastChunk);
+            finally
+            {
+                chunkQueue.CompleteAdding();
+            }
         }
 
-        #endregion
-
-        private static IEnumerable<IEnumerable<ParsedLine>> FixLastChunksToMerge(
-            ParsedLine[][] chunks,
-            int indexOflastChunkWithElements,
-            int realNumberOfElementsInLastChunk)
+        private static void SortChunks(BlockingCollection<List<ParsedLine>> chunkQueue, ref int numberOfTempFiles)
         {
-            var fixedLastChunk = chunks[indexOflastChunkWithElements].Take(realNumberOfElementsInLastChunk);
-            var toMerge = chunks.Take(indexOflastChunkWithElements).Concat(Enumerable.Repeat(fixedLastChunk, 1));
+            foreach (var chunk in chunkQueue.GetConsumingEnumerable())
+            {
+                chunk.Sort();
+                var lines = chunk.Select(pl => pl.Line);
+                var currentFile = Interlocked.Increment(ref numberOfTempFiles);
+                var fileName = $"{ChunkFileName}{currentFile}";
 
-            return toMerge;
+                WriteToFile(fileName, lines);
+            }
         }
 
-        //Do not store last chunks in file; merge them from memory
         private static void MergeChunkFilesIntoOutputFile(
             string outputFileName,
-            int numberOfChunkFiles,
-            IEnumerable<IEnumerable<ParsedLine>> lastChunk,
-            bool withCompression)
+            int maxIndexOfTempFiles)
         {
-            //Chunks from files
-            var enumerators = new List<IEnumerable<ParsedLine>>(numberOfChunkFiles);
-            for (int j = 0; j < numberOfChunkFiles; j++)
+            var enumerators = new List<IEnumerable<ParsedLine>>(maxIndexOfTempFiles);
+            for (int j = 0; j <= maxIndexOfTempFiles; j++)
             {
                 var fileName = GetFilePathToWorkDir($"{ChunkFileName}{j}");
-
-                if (withCompression)
-                {
-                    enumerators.Add(ReadCompressedFiles(fileName));
-                }
-                else
-                {
-                    enumerators.Add(File.ReadLines(fileName).Select(s => new ParsedLine(s)));
-                }
+                enumerators.Add(File.ReadLines(fileName).Select(s => new ParsedLine(s)));
             }
 
-            enumerators.AddRange(lastChunk);
-
-            MergeAndWriteToFile(outputFileName, enumerators, withCompression);
-        }
-        private static void MergeAndWriteToFile(
-            string fileName,
-            IEnumerable<IEnumerable<ParsedLine>> toMerge,
-            bool withCompression = false)
-        {
-            var all = Merger.Merge(toMerge);
-            var outputFile = Path.ChangeExtension(Path.Combine(PathToWorkDir, fileName), FileExtension);
-            WriteToFile(outputFile, all, withCompression);
-        }
-
-
-        // just to compare with PLINQ
-        private static IEnumerable<string> PLINQ_Sorting(string inputFile)
-        {
-            return File.ReadLines(inputFile)
-                       .AsParallel()
-                       .Select(x => new ParsedLine(x))
-                       .Select(l => l.Line)
-                       .AsSequential();
+            var merged = Merger.Merge(enumerators);
+            WriteToFile(outputFileName, merged);
         }
 
         #region File helpers
-        private static IEnumerable<ParsedLine> ReadCompressedFiles(string fileName)
-        {
-            using var fileStream = File.OpenRead(fileName);
-            using var deflateStream = new DeflateStream(fileStream, CompressionMode.Decompress);
-            using var textStream = new StreamReader(deflateStream);
 
-            string? line;
-            while ((line = textStream.ReadLine()) != null)
-            {
-                yield return new ParsedLine(line);
-            }
+        private static void WriteToFile(string fileName, IEnumerable<string> lines)
+        {
+            var outputFile = GetFilePathToWorkDir(fileName);
+            File.WriteAllLines(outputFile, lines);
         }
-        private static void WriteToFile(string fileName, IEnumerable<string> lines, bool withCompression)
+        private static void DeleteChunkFiles(int maxIndexOfTempFiles)
         {
-            if (!withCompression)
-            {
-                File.WriteAllLines(fileName, lines);
-                return;
-            }
-
-            using var fileStream = new FileStream(fileName, FileMode.Create, FileAccess.Write, FileShare.None);
-            using var deflateStream = new DeflateStream(fileStream, CompressionLevel.Fastest);
-            using var textStream = new StreamWriter(deflateStream);
-
-            foreach (var line in lines)
-            {
-                textStream.WriteLine(line);
-            }
-        }
-        private static void DeleteChunkFiles(int numberOfChunkFiles)
-        {
-            for (int j = 0; j < numberOfChunkFiles; j++)
+            for (int j = 0; j <= maxIndexOfTempFiles; j++)
             {
                 var fileName = GetFilePathToWorkDir($"{ChunkFileName}{j}");
                 File.Delete(fileName);
