@@ -1,1 +1,1 @@
-Add readme file
+**Important** There is needed folder WorkDir because of hardcoded paths.
